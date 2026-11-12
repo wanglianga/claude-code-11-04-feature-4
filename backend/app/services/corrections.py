@@ -31,9 +31,13 @@ def _dt(v) -> datetime:
 
 
 # ---------------------------------------------------------------- 月度报表快照
-async def _build_snapshot(db: AsyncSession, channel: str, merchant_id: str,
-                          book_currency: str, report_month: str) -> dict:
-    """按只追加分录的生效期间聚合月度快照（记账币口径）。"""
+async def build_snapshot(db: AsyncSession, channel: str, merchant_id: str,
+                         book_currency: str, report_month: str,
+                         extra_entries: list | None = None) -> dict:
+    """按只追加分录的生效期间聚合月度快照（记账币口径）。
+
+    extra_entries 为尚未落库的待审批差额分录（预览用），不会被写入账本。
+    """
     entries = (
         await db.execute(
             select(LedgerEntry).where(
@@ -49,6 +53,12 @@ async def _build_snapshot(db: AsyncSession, channel: str, merchant_id: str,
     event_ids: set[int] = set()
     for e in entries:
         event_ids.add(e.business_event_id)
+        bucket = by_account.setdefault(
+            e.account, {"DR": Decimal("0"), "CR": Decimal("0")}
+        )
+        bucket[e.direction] += e.book_amount
+    # 待审批差额只参与预览聚合，不是账本事实，不计入业务事件数
+    for e in (extra_entries or []):
         bucket = by_account.setdefault(
             e.account, {"DR": Decimal("0"), "CR": Decimal("0")}
         )
@@ -78,6 +88,12 @@ async def _build_snapshot(db: AsyncSession, channel: str, merchant_id: str,
             "balanced": total_dr == total_cr,
         },
     }
+
+
+async def _build_snapshot(db: AsyncSession, channel: str, merchant_id: str,
+                          book_currency: str, report_month: str) -> dict:
+    """内部兼容入口：纯账本事实快照。"""
+    return await build_snapshot(db, channel, merchant_id, book_currency, report_month)
 
 
 def _fingerprint(snapshot: dict) -> str:
@@ -117,6 +133,17 @@ async def ensure_monthly_report_version(
     )
     snapshot["source_batch_ref"] = batch.batch_ref
     snapshot["source_batch_version"] = batch.version
+    return await _append_snapshot_if_changed(
+        db, report, snapshot,
+        reason=reason, closed=batch.status == "CLOSED",
+    )
+
+
+async def _append_snapshot_if_changed(
+    db: AsyncSession, report: MonthlyReport, snapshot: dict,
+    reason: str, closed: bool,
+) -> dict:
+    """快照指纹不变则复用当前版本；变化才追加新版本（旧版本仅置 SUPERSEDED）。"""
     fp = _fingerprint(snapshot)
 
     current = (
@@ -142,10 +169,9 @@ async def ensure_monthly_report_version(
         snapshot=snapshot, reason=reason,
     ))
     report.current_version = next_version
-    report.status = (
-        ReportStatus.CLOSED if batch.status == "CLOSED" else ReportStatus.DRAFT
-    )
-    if batch.status == "CLOSED":
+    report.status = ReportStatus.CLOSED if closed else ReportStatus.DRAFT
+    if closed and report.closed_at is None:
+        # 关闭结论一经落定即冻结，追加更正版本不得改写关闭时点
         report.closed_at = _now()
     await db.flush()
     return {"report_id": report.id, "version": next_version, "reused": False}

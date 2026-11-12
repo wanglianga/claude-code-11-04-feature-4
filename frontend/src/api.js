@@ -51,4 +51,20 @@ export default {
   // 报表
   reports: () => api.get('/reports'),
   reportVersions: (id) => api.get(`/reports/${id}/versions`),
+
+  // 关闭周期更正审批
+  corrections: (params) => api.get('/corrections', { params }),
+  correction: (id) => api.get(`/corrections/${id}`),
+  submitCorrection: (payload) => api.post('/corrections', payload),
+  approveCorrection: (id, operator, comment) =>
+    api.post(`/corrections/${id}/approve`, { operator, comment }),
+  rejectCorrection: (id, operator, comment) =>
+    api.post(`/corrections/${id}/reject`, { operator, comment }),
+  correctionImpact: (id) => api.get(`/corrections/${id}/impact`),
+  statements: (reportId) => api.get('/correction-statements', { params: { report_id: reportId } }),
+  statement: (id) => api.get(`/correction-statements/${id}`),
+  publishStatement: (reportId, operator) =>
+    api.post(`/reports/${reportId}/correction-statement`, { operator }),
+  consolidateStatements: (operator, reportId) =>
+    api.post('/correction-statements/consolidate', { operator }, { params: { report_id: reportId } }),
 }

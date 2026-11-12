@@ -4,6 +4,7 @@ import DiscrepancyQueueView from './views/DiscrepancyQueueView.vue'
 import BatchReconView from './views/BatchReconView.vue'
 import EventsLedgerView from './views/EventsLedgerView.vue'
 import ReportsView from './views/ReportsView.vue'
+import CorrectionsView from './views/CorrectionsView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/batches', component: BatchReconView, meta: { title: '批次对账' } },
     { path: '/events', component: EventsLedgerView, meta: { title: '事件与账本' } },
     { path: '/reports', component: ReportsView, meta: { title: '月度报表版本' } },
+    { path: '/corrections', component: CorrectionsView, meta: { title: '关闭周期更正审批' } },
   ],
 })
 

@@ -73,12 +73,48 @@ class CloseDiscrepancyIn(BaseModel):
     comment: str | None = None
 
 
+class MatchConfirmIn(BaseModel):
+    operator: str
+
+
 class CloseBatchIn(BaseModel):
     operator: str
 
 
-class MatchConfirmIn(BaseModel):
-    operator: str
+# ---------------------------------------------------------------- 关闭周期更正审批
+class CorrectionSubmitIn(BaseModel):
+    """关闭周期更正申请：补单或解析修复。
+
+    report_month/渠道/商户用于定位已关闭报表；reason 与 impact_scope 为必填的用户说明；
+    approver 为指定审批人（须与提交人不同）。
+    """
+    correction_type: str = Field(..., description="SUPPLEMENT 补单 / PARSING_FIX 解析修复")
+    channel: str
+    merchant_id: str
+    report_month: str = Field(..., description="YYYY-MM 归属关闭周期")
+    reason: str = Field(..., min_length=1, description="更正原因")
+    impact_scope: str = Field(..., min_length=1, description="影响范围说明")
+    approver: str = Field(..., min_length=1, description="指定审批人")
+    operator: str = Field(..., min_length=1, description="提交人")
+    declared_impact: dict[str, Any] | None = Field(
+        default=None, description="提交人自述的受影响订单/渠道/金额",
+    )
+    supplement: dict[str, Any] | None = Field(
+        default=None, description="补单：待补录原始事件 payload（审批前不入账）",
+    )
+    parsing_fix: dict[str, Any] | None = Field(
+        default=None,
+        description="解析修复：{business_event_id, corrected_amount, corrected_fee, note}",
+    )
+
+
+class CorrectionDecisionIn(BaseModel):
+    operator: str = Field(..., description="审批人，须与申请登记一致")
+    comment: str | None = None
+
+
+class StatementPublishIn(BaseModel):
+    operator: str = Field(..., description="合并说明发布人")
 
 
 # ---------------------------------------------------------------- 出参

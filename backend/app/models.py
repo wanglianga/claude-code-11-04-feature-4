@@ -430,6 +430,143 @@ class MonthlyReportVersion(Base):
     )
 
 
+# ---------------------------------------------------------------- L4 关闭周期更正审批
+class ClosedPeriodCorrection(Base):
+    """关闭周期更正申请：补单 / 解析修复。
+
+    提交时生成**待审批差额记录**与**新版本报表预览**，但不进入账本、不替换已归档版本；
+    仅审批通过后才过账差额并正式追加报表版本。驳回为终态，永不进入账本。
+    """
+    __tablename__ = "closed_period_corrections"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    correction_ref: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    correction_type: Mapped[str] = mapped_column(String(20), nullable=False)  # SUPPLEMENT/PARSING_FIX
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    # 归属的已关闭报表（关闭周期）；同一报表的未结更正合并出具一份说明
+    report_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("monthly_reports.id"), nullable=False
+    )
+    batch_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("settlement_batches.id"), nullable=True
+    )
+    report_month: Mapped[str] = mapped_column(String(7), nullable=False)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    merchant_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    # SUPPLEMENT：待补录的原始事件（L1 已留存，审批前不会进入 L2 账本）
+    source_raw_event_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("raw_events.id"), nullable=True
+    )
+    # PARSING_FIX：被修复的原始业务事件
+    target_business_event_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_events.id"), nullable=True
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    impact_scope: Mapped[str] = mapped_column(Text, nullable=False)
+    # 提交时自述的受影响订单/渠道/金额/报表（审批阶段与系统实算结果比对留痕）
+    declared_impact: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    submitted_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+    approver: Mapped[str] = mapped_column(String(100), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 审批通过后生成的差额业务事件（账本中的唯一新增痕迹）
+    delta_business_event_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("business_events.id"), nullable=True
+    )
+    # 提交时的新版本报表预览（不落 monthly_report_versions，不改变关闭结论）
+    preview_report: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # 审批通过后重新校验的账本守恒结果
+    conservation_check: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # 审批通过后系统实算的影响说明（订单号/渠道/金额/报表版本）
+    impact_detail: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    statement_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("correction_statements.id"), nullable=True
+    )
+
+    __table_args__ = (
+        Index("ix_cpc_report_status", "report_id", "status"),
+    )
+
+
+class CorrectionDelta(Base):
+    """待审批/已审批的差额记录，只追加。
+
+    每行是标准账本口径的一条借贷方向行（金额为正，方向单列）；
+    `impact_book_amount` 为带方向业务影响（仅应收侧/主影响行填写），
+    用于合并说明中列出受影响订单金额。
+    """
+    __tablename__ = "correction_deltas"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    correction_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("closed_period_corrections.id"), nullable=False
+    )
+    line_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    order_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    channel: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    channel_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    line_type: Mapped[str] = mapped_column(String(40), nullable=False)  # GROSS/FEE/REVENUE...
+    account: Mapped[str] = mapped_column(String(40), nullable=False)
+    direction: Mapped[str] = mapped_column(String(2), nullable=False, default="DR")  # DR/CR
+    settle_amount: Mapped[Decimal] = mapped_column(AMT, nullable=False)
+    settle_currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    book_amount: Mapped[Decimal] = mapped_column(AMT, nullable=False)
+    book_currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    # 带方向的净影响（只记在主影响行，如渠道应收净变动），供影响说明汇总
+    impact_settle_amount: Mapped[Decimal] = mapped_column(AMT, nullable=False, default=Decimal("0"))
+    impact_book_amount: Mapped[Decimal] = mapped_column(AMT, nullable=False, default=Decimal("0"))
+    memo: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+    __table_args__ = (
+        Index("ix_cd_correction", "correction_id"),
+    )
+
+
+class CorrectionAction(Base):
+    """更正审批轨迹，只追加：提交/通过/驳回/合并出具。"""
+    __tablename__ = "correction_actions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    correction_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("closed_period_corrections.id"), nullable=False
+    )
+    action_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    operator: Mapped[str] = mapped_column(String(100), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+
+class CorrectionStatement(Base):
+    """合并更正说明：同一关闭周期多笔已通过未结更正合并为一份，发布后不可改。"""
+    __tablename__ = "correction_statements"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    statement_ref: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    report_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("monthly_reports.id"), nullable=False
+    )
+    report_month: Mapped[str] = mapped_column(String(7), nullable=False)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    merchant_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    correction_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    published_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+
 APPEND_ONLY_TABLES = [
     "raw_events",
     "business_events",
@@ -437,4 +574,7 @@ APPEND_ONLY_TABLES = [
     "ledger_entries",
     "discrepancy_actions",
     "monthly_report_versions",
+    "correction_deltas",
+    "correction_actions",
+    "correction_statements",
 ]

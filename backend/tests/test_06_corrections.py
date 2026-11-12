@@ -72,13 +72,17 @@ async def test_late_refund_creates_another_version(db):
     await resolve_and_close(db, base["batch"])
     await load_revision_and_close(db)
     await load_fx_correction(db)
-    _, new_versions = await load_late_refund(db)
+    approval, versions_after, statement = await load_late_refund(db)
 
-    # 补单确实产生了新版本（10 月口径变化）
-    assert len(new_versions) >= 1
+    # 关闭后补单经审批通过后产生新报表版本（10 月口径变化）
+    assert len(versions_after) >= 1
     versions = await report_versions(db)
     assert versions[-1].version_status == VersionStatus.CURRENT
     assert versions[-1].version >= 3
+    # 审批通过的补单已过账，并合并出具了一份更正说明
+    assert approval["status"] == "APPROVED"
+    assert approval["ledger_conservation"]["balanced"] is True
+    assert statement.correction_count >= 1
 
 
 async def test_historical_rate_not_overwritten_for_old_events(db):

@@ -19,6 +19,7 @@ class EntityType:
     BANK_TXN = "BANK_TXN"
     MANUAL_ADJ = "MANUAL_ADJ"
     FX_RATE = "FX_RATE"
+    CORRECTION = "CORRECTION"
 
 
 class EventType:
@@ -44,6 +45,8 @@ class EventType:
     MANUAL_ADJUSTMENT = "MANUAL_ADJUSTMENT"
     FX_RATE_PUBLISHED = "FX_RATE_PUBLISHED"
     FX_RATE_CORRECTED = "FX_RATE_CORRECTED"
+    # 关闭周期更正审批通过后的差额过账（解析修复等）
+    CORRECTION_ADJUSTMENT = "CORRECTION_ADJUSTMENT"
 
 
 class PaymentState:
@@ -99,6 +102,32 @@ class ReportStatus:
 class VersionStatus:
     CURRENT = "CURRENT"
     SUPERSEDED = "SUPERSEDED"
+
+
+# ---------------------------------------------------------------- 关闭周期更正审批
+class CorrectionType:
+    SUPPLEMENT = "SUPPLEMENT"          # 关闭后补单（迟到的业务事实）
+    PARSING_FIX = "PARSING_FIX"        # 源数据解析修复（对已入账事实的金额更正）
+
+
+class CorrectionStatus:
+    PENDING = "PENDING"                # 待审批；差额已生成，但未进入账本
+    APPROVED = "APPROVED"              # 审批通过；差额已过账并生成新报表版本
+    REJECTED = "REJECTED"              # 审批驳回；终态，永不进入账本
+    CONSOLIDATED = "CONSOLIDATED"      # 已合并进当期更正说明
+
+    TERMINAL = (REJECTED, CONSOLIDATED)
+
+
+class CorrectionActionType:
+    SUBMIT = "SUBMIT"
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+    CONSOLIDATE = "CONSOLIDATE"
+
+
+class CorrectionStatementStatus:
+    PUBLISHED = "PUBLISHED"
 
 
 # 账本科目（双分录记账）

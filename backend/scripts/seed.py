@@ -6,7 +6,8 @@
   3. 验证只追加保护（直接 SQL 篡改应被触发器拒绝）
   4. 结算单修订 v2 -> 对账 -> 处置 -> 关闭 -> 报表 v2（v1 标记 SUPERSEDED）
   5. 汇率更正 -> 更正账 -> 报表 v3
-  6. 关闭周期补单（10 月退款 11 月补录）-> 报表 v4
+  6. 关闭周期补单：直接摄入被拒 -> 提交更正申请（差额+预览，不入账）
+     -> 解析修复申请被驳回（不入账）-> 两笔通过的更正合并为一份说明 -> 报表 v4
 """
 import argparse
 import asyncio
@@ -18,7 +19,7 @@ from pathlib import Path
 # 允许脱离 PYTHONPATH 直接 `python scripts/seed.py` 运行
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.future import select
 
 from app.database import SessionLocal, engine
@@ -26,16 +27,21 @@ from app.demo import events as demo
 from app.enums import DiscrepancyStatus
 from app.init_db import init_db
 from app.models import (
-    Discrepancy, LedgerEntry, MonthlyReportVersion, SettlementBatch,
+    BusinessEvent, ClosedPeriodCorrection, Discrepancy, LedgerEntry,
+    MonthlyReport, MonthlyReportVersion, SettlementBatch,
 )
-from app.services.ledger import ingest_raw_event, process_event
+from app.services.ledger import IngestError, ingest_raw_event, process_event
 from app.services.reconciliation import run_reconciliation
 from app.services.workflow import (
     claim, suggest_adjustment, post_adjustment, close_discrepancy, close_batch,
 )
-from app.services.corrections import regenerate_closed_reports
+from app.services.correction_approval import (
+    approve_correction, publish_consolidated_statement, reject_correction,
+    submit_correction,
+)
 
 OPERATOR = "finance.chen"
+APPROVER = "finance.lead"
 
 
 async def _ingest(db, event):
@@ -168,14 +174,103 @@ async def main(reset: bool = False) -> None:
         print(f"   更正分录 {len(correction_entries)} 行，借 {dr} / 贷 {cr}（平衡：{dr == cr}）")
         assert dr == cr
 
-        print("== 8. 关闭周期补单（10 月退款 11 月补录） ==")
-        _, _, late = await _ingest(db, demo.late_october_refund_event())
+        print("== 8. 关闭周期更正审批（补单 / 解析修复） ==")
+        # 8.1 绕过审批直接补录 -> 必须被拒
+        late_raw, _ = await ingest_raw_event(db, demo.late_october_refund_event())
+        try:
+            await process_event(db, late_raw)
+            raise SystemExit("错误：关闭周期补单被直接入账！")
+        except IngestError as exc:
+            print(f"   直接补录被拒：{exc}")
+            await db.rollback()
+        # 8.2 提交补单更正申请：差额+预览生成，但不入账
+        entries_before = (await db.execute(
+            select(func.count()).select_from(LedgerEntry)
+        )).scalar_one()
+        late_event = demo.late_october_refund_event()
+        supp = await submit_correction(
+            db, correction_type="SUPPLEMENT", channel=demo.CHANNEL,
+            merchant_id=demo.MERCHANT, report_month="2026-10",
+            reason="关闭后发现 10-28 退款迟报，补录退款事实",
+            impact_scope="ORD-008 / STRIPE / 退款 10 USD（手续费 0.3）",
+            approver=APPROVER, operator=OPERATOR,
+            declared_impact={"orders": ["ORD-008"], "channels": [demo.CHANNEL]},
+            supplement_payload={**late_event.payload,
+                                "idempotency_key": late_event.idempotency_key},
+        )
         await db.commit()
-        new_versions = await regenerate_closed_reports(db)
+        entries_after_submit = (await db.execute(
+            select(func.count()).select_from(LedgerEntry)
+        )).scalar_one()
+        print(f"   提交 {supp.correction_ref} [{supp.status}]："
+              f"差额行未入账（分录 {entries_before} -> {entries_after_submit}），"
+              f"报表预览 v{supp.preview_report.get('preview_of_report_version')}")
+        assert entries_after_submit == entries_before, "待审批差额不得入账"
+
+        # 8.3 解析修复申请：审批驳回 -> 永不进入账本
+        target = (await db.execute(
+            select(BusinessEvent).where(
+                BusinessEvent.business_key == "PAYMENT_CAPTURED:P-008:v1"
+            )
+        )).scalar_one()
+        parsing = await submit_correction(
+            db, correction_type="PARSING_FIX", channel=demo.CHANNEL,
+            merchant_id=demo.MERCHANT, report_month="2026-10",
+            reason="ORD-008 源报文解析修复：本金 70 -> 75",
+            impact_scope="ORD-008 / STRIPE / 本金差额 +5 USD",
+            approver=APPROVER, operator=OPERATOR,
+            parsing_fix={"business_event_id": target.id,
+                         "corrected_amount": "75", "note": "解析修复"},
+        )
+        await reject_correction(db, parsing.id, APPROVER, "渠道对账单未支持该修正，驳回")
         await db.commit()
-        print(f"   补单触发新报表版本：{new_versions}")
+        entries_after_reject = (await db.execute(
+            select(func.count()).select_from(LedgerEntry)
+        )).scalar_one()
+        print(f"   解析修复 {parsing.correction_ref} 被驳回：分录 {entries_after_reject} 行未变")
+        assert entries_after_reject == entries_before, "驳回的更正不得进入账本"
+
+        # 8.4 审批通过补单：差额过账 + 守恒复核 + 新报表版本
+        approval = await approve_correction(
+            db, supp.id, APPROVER, "核对渠道退款单与银行流水，通过"
+        )
+        await db.commit()
+        print(f"   {supp.correction_ref} 审批通过：差额分录 {approval['correction_entries']} 行，"
+              f"守恒复核={approval['ledger_conservation']['balanced']}，"
+              f"报表版本={approval['report_version']}")
+
+        # 8.5 同周期多笔已通过未结更正合并出具一份说明
+        second = await submit_correction(
+            db, correction_type="PARSING_FIX", channel=demo.CHANNEL,
+            merchant_id=demo.MERCHANT, report_month="2026-10",
+            reason="ORD-008 解析修复复核通过，按正确金额补差",
+            impact_scope="ORD-008 / STRIPE / 本金差额 +5 USD",
+            approver=APPROVER, operator=OPERATOR,
+            parsing_fix={"business_event_id": target.id,
+                         "corrected_amount": "75", "note": "解析修复"},
+        )
+        await db.commit()
+        await approve_correction(
+            db, second.id, APPROVER, "复核对账单后通过"
+        )
+        await db.commit()
+        report = (await db.execute(select(MonthlyReport))).scalar_one()
+        statement = await publish_consolidated_statement(db, report.id, APPROVER)
+        await db.commit()
+        snap = statement.snapshot
+        print(f"   合并更正说明 {statement.statement_ref}：{statement.correction_count} 笔更正，"
+              f"受影响订单 {[o['order_ref'] for o in snap['affected_orders']]}，"
+              f"渠道 {snap['affected_channels']}，"
+              f"金额 {snap['totals']['book_amount']} {snap['totals']['book_currency']}")
 
         print("== 9. 最终汇总 ==")
+        corrections = (await db.execute(
+            select(ClosedPeriodCorrection).order_by(ClosedPeriodCorrection.id)
+        )).scalars().all()
+        for c in corrections:
+            print(f"   更正 {c.correction_ref} [{c.status}] "
+                  f"审批人={c.approver} 差额事件={c.delta_business_event_id} "
+                  f"说明={c.statement_id}")
         versions = (
             await db.execute(
                 select(MonthlyReportVersion).order_by(MonthlyReportVersion.version)
@@ -187,7 +282,6 @@ async def main(reset: bool = False) -> None:
                 f"借贷平衡={v.snapshot['conservation_check']['balanced']} "
                 f"事件数={v.snapshot['business_event_count']} 原因={v.reason}"
             )
-        from sqlalchemy import func
         balances = (
             await db.execute(
                 select(

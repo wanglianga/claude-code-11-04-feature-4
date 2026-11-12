@@ -114,6 +114,9 @@ table.data .num { text-align: right; font-variant-numeric: tabular-nums; }
 .badge.CONFIRMED { background: var(--green-soft); color: var(--green); }
 .badge.CURRENT { background: var(--green-soft); color: var(--green); }
 .badge.SUPERSEDED { background: #eef2f7; color: var(--slate); }
+.badge.SUPPLEMENT { background: #e8f0fe; color: var(--primary); }
+.badge.PARSING_FIX { background: var(--purple-soft); color: var(--purple); }
+.badge.PUBLISHED { background: var(--green-soft); color: var(--green); }
 
 /* ---------------- 按钮与表单 */
 button, .btn {

@@ -8,7 +8,7 @@ PYTHON_BIN="${PYTHON:-$(command -v python || command -v python3)}"
 export RECON_DATABASE_URL="${RECON_DATABASE_URL:-postgresql+asyncpg://recon:recon@localhost:5432/recon}"
 export PYTHONPATH="$(pwd)"
 
-echo "=========== 1/2 pytest 验收套件（27 用例） ==========="
+echo "=========== 1/2 pytest 验收套件（36 用例） ==========="
 "$PYTHON_BIN" -m pytest tests/ -q
 
 echo "=========== 2/2 端到端场景种子（重置 schema 后装载） ==========="

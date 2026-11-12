@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..enums import Account, EventType, PaymentState as PS
 from ..models import (
-    BusinessEvent, LedgerEntry, OrderState, PaymentState, RawEvent,
+    BusinessEvent, LedgerEntry, MonthlyReport, OrderState, PaymentState, RawEvent,
     SettlementBatch, SettlementLine, BankTransaction, FxRate,
 )
 from ..schemas import RawEventIn
@@ -72,6 +72,47 @@ async def ingest_raw_event(db: AsyncSession, data: RawEventIn) -> tuple[RawEvent
     return row, False
 
 
+# 直接摄入会改变已关闭周期账面的事实类事件；这些必须走关闭周期更正审批
+_GUARDED_ON_CLOSED_PERIOD = {
+    EventType.PAYMENT_CAPTURED,
+    EventType.REFUND_SUCCEEDED,
+    EventType.CHARGEBACK_OPENED,
+    EventType.CHARGEBACK_REVERSED,
+    EventType.PAYMENT_AUTHORIZED,
+    EventType.PAYMENT_CREATED,
+    EventType.ORDER_CREATED,
+    EventType.ORDER_PAID,
+    EventType.ORDER_STATUS_CHANGED,
+}
+
+
+async def _guard_closed_period(db: AsyncSession, be: BusinessEvent, p: dict) -> None:
+    """已关闭周期的补单/修复不得绕过审批直接入账（审批未通过不得进入账本）。"""
+    if be.event_type not in _GUARDED_ON_CLOSED_PERIOD:
+        return
+    if not be.channel or not be.merchant_id:
+        return
+    # 归属期按业务发生时间判定（补录消息的到达时间可能已在下一周期）
+    business_at = _dt(p.get("event_time") or be.event_time)
+    month = business_at.strftime("%Y-%m")
+    closed = (
+        await db.execute(
+            select(MonthlyReport).where(
+                MonthlyReport.channel == be.channel,
+                MonthlyReport.merchant_id == be.merchant_id,
+                MonthlyReport.report_month == month,
+                MonthlyReport.status == "CLOSED",
+            )
+        )
+    ).scalar_one_or_none()
+    if closed is None:
+        return
+    raise IngestError(
+        f"{month} 周期已关闭，{be.event_type} 事件不能直接补录进账；"
+        f"请提交关闭周期更正申请（POST /api/corrections）并经审批通过后过账"
+    )
+
+
 async def process_event(db: AsyncSession, raw: RawEvent) -> BusinessEvent | None:
     """归一化并过账。返回 business_event；重复业务键返回 None（账本保持不动）。"""
     p = raw.payload
@@ -108,6 +149,8 @@ async def process_event(db: AsyncSession, raw: RawEvent) -> BusinessEvent | None
         payload=p,
         supersedes_event_id=p.get("supersedes_event_id"),
     )
+    # 关闭周期守卫：必须在落库/过账前拦截
+    await _guard_closed_period(db, be, p)
     db.add(be)
     await db.flush()
 

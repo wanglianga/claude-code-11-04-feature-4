@@ -44,6 +44,7 @@ const menu = [
   { path: '/batches', label: '批次对账', icon: '⛓' },
   { path: '/events', label: '事件与账本', icon: '≣' },
   { path: '/reports', label: '月度报表版本', icon: '◷' },
+  { path: '/corrections', label: '关闭周期更正审批', icon: '✓' },
 ]
 
 const healthy = ref(true)

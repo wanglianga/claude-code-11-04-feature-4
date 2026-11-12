@@ -5,9 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import events as demo
-from ..enums import DiscrepancyStatus
+from ..enums import CorrectionType, DiscrepancyStatus
 from ..models import BusinessEvent, Discrepancy, MonthlyReportVersion, SettlementBatch
-from ..services.corrections import regenerate_closed_reports
+from ..services.correction_approval import (
+    approve_correction, publish_consolidated_statement, submit_correction,
+)
 from ..services.ledger import ingest_raw_event, process_event
 from ..services.reconciliation import run_reconciliation
 from ..services.workflow import (
@@ -15,6 +17,7 @@ from ..services.workflow import (
 )
 
 OPERATOR = "finance.chen"
+APPROVER = "finance.lead"
 
 
 async def ingest(db: AsyncSession, event):
@@ -97,12 +100,35 @@ async def load_fx_correction(db: AsyncSession) -> BusinessEvent:
 
 
 async def load_late_refund(db: AsyncSession):
-    """阶段 5：关闭周期补单 + 报表新版本。"""
-    _, _, be = await ingest(db, demo.late_october_refund_event())
+    """阶段 5：关闭周期补单走更正审批流。
+
+    提交更正申请（生成差额记录与报表预览，不入账）-> 审批通过（差额过账 + 新报表版本）
+    -> 同周期更正合并为一份更正说明。
+    """
+    late_event = demo.late_october_refund_event()
+    correction = await submit_correction(
+        db,
+        correction_type=CorrectionType.SUPPLEMENT,
+        channel=demo.CHANNEL,
+        merchant_id=demo.MERCHANT,
+        report_month="2026-10",
+        reason="关闭后发现 10-28 退款迟报，补录退款事实",
+        impact_scope=f"{late_event.payload.get('order_ref')} / {demo.CHANNEL} / 退款 10 USD",
+        approver=APPROVER,
+        operator=OPERATOR,
+        declared_impact={
+            "orders": [late_event.payload.get("order_ref")],
+            "channels": [demo.CHANNEL],
+        },
+        supplement_payload={**late_event.payload, "idempotency_key": late_event.idempotency_key},
+    )
+    await db.flush()
+    approval = await approve_correction(db, correction.id, APPROVER, "核对渠道退款单，通过")
+    await db.flush()
+    statement = await publish_consolidated_statement(db, correction.report_id, APPROVER)
     await db.commit()
-    versions = await regenerate_closed_reports(db)
-    await db.commit()
-    return be, versions
+    versions = await report_versions(db)
+    return approval, versions, statement
 
 
 async def report_versions(db: AsyncSession) -> list[MonthlyReportVersion]:
